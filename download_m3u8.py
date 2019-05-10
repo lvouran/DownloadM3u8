@@ -5,7 +5,7 @@
 # @File    : download_m3u8.py
 # @funtion :
 # ------------------------
-import requests, os, hashlib
+import requests, os, hashlib, time, random
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
@@ -35,6 +35,21 @@ class M3u8(object):
             }
         self.create_download_dirs(self.m3u8_file_path)
         self.create_download_dirs(self.movie_path)
+        self.retry_count = 5
+        self._s = requests.session()
+        self._s.keep_alive = False
+        self.proxies = [
+            '114.226.135.246:4207',
+            '124.116.172.248:4251',
+            '60.210.166.230:4284',
+            '182.244.168.217:4265',
+            '27.25.99.13:4271',
+            '125.123.22.71:4225',
+            '117.66.26.161:4265',
+            '117.28.113.239:4286',
+            '112.114.164.51:4228',
+            '182.99.153.238:4276'
+        ]
 
     @staticmethod
     def md5(_str):
@@ -64,13 +79,13 @@ class M3u8(object):
         :param m_file_path: 文件的绝对路径
         :return: None
         """
-        _title_list = set()
-        _url_list = set()
+        _title_list = []
+        _url_list = []
         with open(m_file_path, 'r', encoding='utf8') as _f:
             for line in _f:
                 info_list = line.replace('\n', '').split('\t')
-                _title_list.add(info_list[0])
-                _url_list.add(info_list[1])
+                _title_list.append(info_list[0])
+                _url_list.append(info_list[1])
         return _title_list, _url_list
 
     def download_movies(self, mv_file_path, start_url, title):
@@ -84,18 +99,26 @@ class M3u8(object):
         if mv_file_path:
             with open(mv_file_path, 'r', encoding='utf8') as f:
                 assert '#EXTM3U' in f.readline(), '检查文件类型,文件起始并无m3u8格式的标识...'
-                _movie_f = open(os.path.join(self.movie_path, '{title}.mp4'), 'ab+')
+                # _movie_f = open(os.path.join(self.movie_path, f'{title}.mp4'), 'ab+')
                 for index, lines in tqdm(enumerate(f)):
                     if 'ts' in lines:
                         _movie_url = lines.replace('\n', '')
                         if 'http' not in lines:
                             _movie_url = self.get_compurl(start_url, _movie_url)
-                        _movie_res = requests.get(_movie_url, headers=self.headers)
-                        if _movie_res.status_code != 200:
-                            return f'下载失败...url:\t{start_url}\t状态码\t{_movie_res.status_code}\t位置\t{lines}', start_url, lines, title
-                        _movie_f.write(_movie_res.content)
-                _movie_f.close()
-            return '', '', ''
+                        _movie_res = self.retry_request(_movie_url, headers=self.headers)
+                        if not _movie_res:
+                            # 如果下载失败
+                            yield False, _movie_res, lines, start_url, title
+                        else:
+                            yield True, _movie_res, lines, start_url, title
+            #             if not _movie_res:
+            #                 # 这里需要将信息返回，并且关掉当前线程
+            #                 return f'下载失败...url:\t{start_url}\t状态码\t位置\t{lines}', start_url, lines, title
+            #             # 这里须要获取各个线成顺序性的返回，而不是直接写入文件，开启另外一个线程专门用来将所有的视频片段按顺序写成整个文件
+            #             # 即使视频下载了一半也需要将一半写成文件，并记录当前失败位置，方便继续下载
+            #             _movie_f.write(_movie_res.content)
+            #     _movie_f.close()
+            # return '', '', ''
 
     def get_compurl(self, m_base_url, broken_url):
         """
@@ -115,11 +138,11 @@ class M3u8(object):
         assert m_url, '起始url不能为空...'
         if not m_file_name:
             m_file_name = self.md5(m_url)
-        _file_res = requests.get(m_url, headers=self.headers)
-        if _file_res.status_code != 200:
+        _file_res = self.retry_request(m_url, self.headers)
+        if not _file_res:
             # 这里需要测试下需不需要锁
             with open('file_error.txt', 'a', encoding='utf8') as _f:
-                _f.write(f'此url:\t{m_url}返回的的状态码{_file_res.status_code}不为200...')
+                _f.write(f'此url:\t{m_url}返回的的状态码不为200...\n')
                 return None
         with open(os.path.join(self.m3u8_file_path, self.md5(m_url)), 'wb') as file_f:
             file_f.write(_file_res.content)
@@ -143,29 +166,52 @@ class M3u8(object):
                     _flag = 1
                 if _flag:
                     self.download_movies(_file_path, start_url, title)
-# class Proxy(object):
-#     def __init__(self):
-#         pass
-#
-#     def get_proxies(self):
-#         pass
-#
-#     def add_proxy(self):
-#         pass
-#
-#     def update_proxy(self):
-#         pass
+
+    def retry_request(self, retry_url, headers):
+        try:
+            for _i in range(1, self.retry_count + 1):
+                # proxy = {
+                #     'http': f'http://{random.choice(self.proxies)}'
+                # }
+                time.sleep(_i)
+                _res = self._s.get(retry_url, headers=headers)
+                if _res.status_code == 200:
+                    return _res
+            return False
+        except Exception:
+            return False
+
+    def deal_res(self, m_file, url, _title):
+        for flag, res, broken_liens, start_url, title in test.download_movies(m_file, url, _title):
+            # 对返回的结果进行判断，生成器
+            if flag:
+                # 下载成功， 整合成mp4文件
+                with open(os.path.join(self.movie_path, f'{title}.mp4'), 'ab+') as _f:
+                    _f.write(res.content)
+                print(res.url, broken_liens, start_url)
+            else:
+                # 下载失败， 将下载成功的部分整合成mp4文件，失败的地方记录，方便继续下载
+                print(res.url, broken_liens, start_url)
+                with open(f'{title}error.txt', 'a') as error_f:
+                    error_f.write(f'下载失败...url:{start_url}位置{broken_liens}\t{start_url}\t{broken_liens}\t{title}')
+                return False
 
 
 if __name__ == '__main__':
-    url = 'http://119.97.184.228:1126/trials/2019_year/05_month/07_day/558154BA_9254_D33E_FB87_4F5F0F9BD961/9B5834FB_AB7A_70B7_306A_8828917DE4F6/92304845_E648_EC77_ACA4_E9FDE6F13A78vod.m3u8'
+    error_count = 0
     test = M3u8()
     _error_f = open('movie_errors.txt', 'a', encoding='utf8')
     executor = ThreadPoolExecutor(max_workers=5)
-    title_list, url_list = test.get_url_from_file('m3u8.txt')
+    title_list, url_list = test.get_url_from_file('test.txt')
     print(title_list, url_list)
     m_files = executor.map(test.get_m3u8_body, url_list)
-    for item in executor.map(test.download_movies, m_files, url_list, title_list):
-        for error_str, start_url, location, title in item:
-            _error_f.write(f'{error_str}\t{start_url}\t{location}\t{title}\t\n')
+    print(m_files)
+    print(url_list)
+    print(title_list)
+    for item in executor.map(test.deal_res, m_files, url_list, title_list):
+        if item is False:
+            error_count += 1
+        # for error_str, start_url, location, title in item:
+        #     _error_f.write(f'{error_str}\t{start_url}\t{location}\t{title}\t\n')
     _error_f.close()
+    print(f'下载结束....总过错误得个数为{error_count}个')

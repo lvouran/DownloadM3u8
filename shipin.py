@@ -121,7 +121,7 @@ if __name__ == '__main__':
     test = CourtViod()
     for k, v in test.url_dict.items():
         if k == 'recorded':
-            for i in range(658, 5000):
+            for i in range(745, 5000):
                 for caseid, title in test.get_recorded_caseid(v.format(i), k):
                     _url = test.base_url.format(caseid)
                     m3u8_url = test.get_recorded_m3u8(_url, k)
